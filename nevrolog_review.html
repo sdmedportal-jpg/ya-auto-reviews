@@ -64347,6 +64347,7 @@
         <div class="changes-panel-actions">
             <button class="changes-btn copy" onclick="copyChanges()">Копировать YAML</button>
             <button class="changes-btn clear" onclick="clearChanges()">Очистить</button>
+            <button class="changes-btn clear" onclick="resetAll()" style="background: #d32f2f; color: #fff;">Сбросить всё</button>
         </div>
     </div>
 
@@ -64381,7 +64382,16 @@
 
     <script>
         const SPECIALTY = 'nevrolog';
-        const pendingChanges = {};
+        const STORAGE_KEY = 'pendingChanges_' + SPECIALTY;
+        const CLUSTER_STORAGE_KEY = 'pendingClusterBundles_' + SPECIALTY;
+
+        // Загружаем сохранённые изменения из localStorage
+        const pendingChanges = (() => {
+            try {
+                const saved = localStorage.getItem(STORAGE_KEY);
+                return saved ? JSON.parse(saved) : {};
+            } catch(e) { return {}; }
+        })();
 
         function toggleSection(header) {
             const content = header.nextElementSibling;
@@ -64732,6 +64742,86 @@
             if (savedState === 'preview') {
                 applyPreviewState(true);
             }
+
+            // Восстанавливаем сохранённые изменения интентных бандлов
+            const isPreview = savedState === 'preview';
+            for (const [intent, data] of Object.entries(pendingChanges)) {
+                for (const b of (data.bundles || [])) {
+                    const bundle = document.querySelector(`.bundle[data-intent="${intent}"][data-id="${b.id}"]`);
+                    if (!bundle) continue;
+
+                    const h1Container = bundle.querySelector('.bundle-h1');
+                    const h2Container = bundle.querySelector('.bundle-h2');
+                    const textContainer = bundle.querySelector('.bundle-text');
+                    const h1Field = bundle.querySelector('[data-field="h1"]');
+                    const h2Field = bundle.querySelector('[data-field="h2"]');
+                    const textField = bundle.querySelector('[data-field="text"]');
+
+                    if (h1Container && h1Field) {
+                        h1Container.dataset.orig = b.h1;
+                        h1Container.dataset.preview = substituteSpecialty(b.h1);
+                        h1Field.textContent = isPreview ? h1Container.dataset.preview : b.h1;
+                    }
+                    if (h2Container && h2Field) {
+                        h2Container.dataset.orig = b.h2;
+                        h2Container.dataset.preview = substituteSpecialty(b.h2);
+                        h2Field.textContent = isPreview ? h2Container.dataset.preview : b.h2;
+                    }
+                    if (textContainer && textField) {
+                        textContainer.dataset.orig = b.text;
+                        textContainer.dataset.preview = substituteSpecialty(b.text);
+                        textField.textContent = isPreview ? textContainer.dataset.preview : b.text;
+                    }
+                    bundle.classList.add('modified');
+                }
+                // Восстанавливаем удалённые бандлы
+                for (const excludeId of (data.excludes || [])) {
+                    const bundle = document.querySelector(`.bundle[data-intent="${intent}"][data-id="${excludeId}"]`);
+                    if (bundle) {
+                        bundle.classList.add('deleted');
+                        bundle.classList.remove('editing', 'modified');
+                        bundle.querySelectorAll('.bundle-field').forEach(field => field.contentEditable = false);
+                    }
+                }
+            }
+
+            // Восстанавливаем сохранённые изменения кластерных бандлов
+            for (const [clusterName, bundles] of Object.entries(pendingClusterBundles)) {
+                for (const b of bundles) {
+                    const bundleEl = document.querySelector(`.preview-bundle[data-cluster="${clusterName}"][data-bundle-id="${b.id}"]`);
+                    if (!bundleEl) continue;
+
+                    const h1Field = bundleEl.querySelector('[data-field="h1"]');
+                    const h2Field = bundleEl.querySelector('[data-field="h2"]');
+                    const textField = bundleEl.querySelector('[data-field="text"]');
+
+                    if (h1Field) {
+                        // Обновляем текстовый узел (не трогаем счётчик)
+                        for (const node of h1Field.childNodes) {
+                            if (node.nodeType === Node.TEXT_NODE) { node.textContent = b.h1; break; }
+                        }
+                        h1Field.dataset.orig = b.h1;
+                    }
+                    if (h2Field) {
+                        for (const node of h2Field.childNodes) {
+                            if (node.nodeType === Node.TEXT_NODE) { node.textContent = b.h2; break; }
+                        }
+                        h2Field.dataset.orig = b.h2;
+                    }
+                    if (textField) {
+                        for (const node of textField.childNodes) {
+                            if (node.nodeType === Node.TEXT_NODE) { node.textContent = b.text; break; }
+                        }
+                        textField.dataset.orig = b.text;
+                    }
+                    bundleEl.classList.add('modified');
+                }
+            }
+
+            // Обновляем панель изменений
+            if (Object.keys(pendingChanges).length > 0 || Object.keys(pendingClusterBundles).length > 0) {
+                updateChangesPanel();
+            }
         });
 
         let currentEditingBundle = null;
@@ -64755,7 +64845,7 @@
             if (bundleEl.classList.contains('deleted')) return;
 
             if (currentEditingBundle && currentEditingBundle !== bundleEl) {
-                cancelEdit(currentEditingBundle.querySelector('.bundle-btn'));
+                saveBundle(currentEditingBundle);
             }
 
             bundleEl.classList.add('editing');
@@ -64863,8 +64953,8 @@
             return result;
         }
 
-        function saveBundle(btn) {
-            const bundle = btn.closest('.bundle');
+        function saveBundle(btnOrBundle) {
+            const bundle = btnOrBundle.classList.contains('bundle') ? btnOrBundle : btnOrBundle.closest('.bundle');
             if (!bundle) {
                 console.error('saveBundle: bundle not found');
                 return;
@@ -64920,6 +65010,7 @@
 
             currentEditingBundle = null;
             updateChangesPanel();
+            persistChanges();
         }
 
         function deleteBundle(btn) {
@@ -64942,6 +65033,7 @@
 
             currentEditingBundle = null;
             updateChangesPanel();
+            persistChanges();
         }
 
         function addNewBundle(btn) {
@@ -65125,12 +65217,22 @@
             if (!confirm('Очистить все накопленные изменения?')) return;
 
             for (const key in pendingChanges) delete pendingChanges[key];
+            for (const key in pendingClusterBundles) delete pendingClusterBundles[key];
 
             document.querySelectorAll('.bundle.modified').forEach(b => b.classList.remove('modified'));
             document.querySelectorAll('.bundle.deleted').forEach(b => b.remove());
+            document.querySelectorAll('.preview-bundle.modified').forEach(b => b.classList.remove('modified'));
 
+            persistChanges();
             updateChangesPanel();
             document.getElementById('changesPanel').classList.remove('visible');
+        }
+
+        function resetAll() {
+            if (!confirm('Сбросить ВСЕ изменения и вернуться к оригиналу? Страница будет перезагружена.')) return;
+            localStorage.removeItem(STORAGE_KEY);
+            localStorage.removeItem(CLUSTER_STORAGE_KEY);
+            location.reload();
         }
 
         // Copy bundle dialog
@@ -65261,8 +65363,21 @@
             closeCopyBundleDialog();
         }
 
+        // Сохранение в localStorage
+        function persistChanges() {
+            try {
+                localStorage.setItem(STORAGE_KEY, JSON.stringify(pendingChanges));
+                localStorage.setItem(CLUSTER_STORAGE_KEY, JSON.stringify(pendingClusterBundles));
+            } catch(e) { console.error('Failed to persist changes:', e); }
+        }
+
         // Cluster bundles — inline редактирование бандлов для кластеров
-        const pendingClusterBundles = {};
+        const pendingClusterBundles = (() => {
+            try {
+                const saved = localStorage.getItem(CLUSTER_STORAGE_KEY);
+                return saved ? JSON.parse(saved) : {};
+            } catch(e) { return {}; }
+        })();
         let currentEditingClusterBundle = null;
 
         // Закрываем редактирование при клике вне бандла (сохраняя изменения)
@@ -65294,8 +65409,8 @@
                 // Если клик на другой .bundle — editBundle сам закроет текущий
                 if (e.target.closest('.bundle')) return;
 
-                // Клик вне бандла — отменяем редактирование
-                cancelEdit(currentEditingBundle);
+                // Клик вне бандла — автосохраняем изменения
+                saveBundle(currentEditingBundle);
             }
         });
 
@@ -65434,6 +65549,7 @@
             currentEditingClusterBundle = null;
 
             updateChangesPanel();
+            persistChanges();
         }
 
         function cancelClusterBundleEdit(btn) {
@@ -65601,6 +65717,7 @@
             }
 
             updateChangesPanel();
+            persistChanges();
         }
 
         function updateComboErrorBadge(bundleEl) {
